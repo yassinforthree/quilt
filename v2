@@ -1,0 +1,98 @@
+# Install packages if needed
+install.packages(c("data.table", "ggplot2", "scales", "tidyquant"))
+
+# Load libraries
+library(data.table)
+library(ggplot2)
+library(scales)
+library(tidyquant)
+
+# -----------------------------
+# 1. Define Asset Classes, Categories, and Yahoo Finance Tickers
+# -----------------------------
+asset_info <- data.table(
+  asset_class = c("U.S. equities", "China equities", "Europe equities", "Japan equities",
+                  "EM equities", "High yield", "IG credit", "DM gov. debt",
+                  "Emerging debt", "Infrastructure", "REITs", "Commodities", "Cash"),
+  ticker = c("^GSPC", "MCHI", "VGK", "EWJ", 
+             "EEM", "HYG", "LQD", "IEF", 
+             "EMB", "IGF", "VNQ", "DBC", "BIL"),
+  category = c("Equities", "Equities", "Equities", "Equities",
+               "Equities", "Bonds", "Bonds", "Bonds",
+               "Bonds", "Private", "Private", "Private", "Bonds")
+)
+
+# -----------------------------
+# 2. Fetch Data from Yahoo Finance
+# -----------------------------
+start_date <- "2011-01-01"
+end_date <- Sys.Date()
+
+prices <- tq_get(asset_info$ticker, from = start_date, to = end_date, get = "stock.prices")
+
+# Convert to data.table
+DT <- as.data.table(prices)
+
+# -----------------------------
+# 3. Calculate Annual Returns
+# -----------------------------
+annual_returns <- DT[, .(annual_return = (last(adjusted) / first(adjusted)) - 1),
+                     by = .(symbol, year = year(date))]
+
+# Merge with asset info
+annual_returns <- merge(annual_returns, asset_info, by.x = "symbol", by.y = "ticker", all.x = TRUE)
+
+# Keep only years >= 2011 and <= current year
+annual_returns <- annual_returns[year >= 2011 & year <= year(Sys.Date())]
+
+# -----------------------------
+# 4. Compute Annualised Returns (CAGR)
+# -----------------------------
+annualised <- annual_returns[, .(
+  annual_return = (prod(1 + annual_return)^(1/.N)) - 1,
+  year = "Annualised"
+), by = .(asset_class, category)]
+
+# Combine data
+combined <- rbindlist(list(annual_returns, annualised), fill = TRUE)
+
+# -----------------------------
+# 5. Rank Assets Per Year
+# -----------------------------
+combined[, rank := frank(-annual_return, ties.method = "first"), by = year]
+
+# -----------------------------
+# 6. Prepare Labels for Tiles
+# -----------------------------
+combined[, label := paste0(asset_class, "\n", percent(annual_return, accuracy = 0.1))]
+
+# -----------------------------
+# 7. Define Colors by Category
+# -----------------------------
+category_colors <- c(
+  "Equities" = "#0F8D57",    # Green
+  "Bonds" = "#F5D142",       # Yellow
+  "Private" = "#D9481E"      # Red/Orange
+)
+
+# -----------------------------
+# 8. Plot Quilt Using ggplot2
+# -----------------------------
+p <- ggplot(combined, aes(x = factor(year), y = rank, fill = category)) +
+  geom_tile(width = 0.95, height = 0.95, color = "white") +
+  geom_text(aes(label = label), size = 3, color = "white") +
+  scale_fill_manual(values = category_colors) +
+  scale_y_reverse() +  # Top performer at top
+  labs(title = "Annual Asset Class Performance (BlackRock-Style Quilt)",
+       x = "", y = "", fill = "Category") +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(face = "bold"),
+    panel.grid = element_blank(),
+    legend.position = "bottom"
+  )
+
+# Show the plot
+print(p)
