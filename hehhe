@@ -1,0 +1,95 @@
+# Install required packages
+install.packages(c("shiny", "data.table", "tidyquant", "plotly", "ggplot2", "scales"))
+
+library(shiny)
+library(data.table)
+library(tidyquant)  # For Yahoo Finance API
+library(plotly)
+library(ggplot2)
+library(scales)
+
+# -----------------------------
+# 1. Asset tickers
+# -----------------------------
+asset_tickers <- data.table(
+  asset_class = c("US Large Cap", "Intl Equity", "Emerging Markets", "US Bonds", 
+                  "Commodities", "Real Estate", "Gold", "Cash"),
+  ticker = c("^GSPC", "EFA", "EEM", "AGG", "DBC", "VNQ", "GLD", "BIL")
+)
+
+# -----------------------------
+# 2. Fetch data from Yahoo Finance
+# -----------------------------
+fetch_returns <- function(start_date = "2014-01-01", end_date = Sys.Date()) {
+  prices <- tq_get(asset_tickers$ticker,
+                   from = start_date, to = end_date,
+                   get = "stock.prices")
+  
+  # Convert to data.table
+  DT <- as.data.table(prices)
+  
+  # Calculate annual returns
+  annual_returns <- DT[, .(annual_return = (last(adjusted) / first(adjusted)) - 1),
+                       by = .(symbol, year = year(date))]
+  
+  # Merge with asset names
+  annual_returns <- merge(annual_returns, asset_tickers, by.x = "symbol", by.y = "ticker", all.x = TRUE)
+  
+  return(annual_returns)
+}
+
+returns_data <- fetch_returns()
+
+# -----------------------------
+# 3. Shiny App with data.table
+# -----------------------------
+ui <- fluidPage(
+  titlePanel("Asset Class Return Map (Data.Table Version)"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("benchmark", "Select Benchmark:", choices = asset_tickers$asset_class),
+      radioButtons("view_type", "View Mode:", choices = c("Absolute" = "absolute", "Relative" = "relative")),
+      width = 3
+    ),
+    mainPanel(
+      plotlyOutput("quiltPlot", height = "700px"),
+      width = 9
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  
+  processed_data <- reactive({
+    DT <- copy(returns_data)
+    
+    # Add rank within each year
+    DT[, rank := frank(-annual_return, ties.method = "dense"), by = year]
+    
+    # Compute relative returns if needed
+    if (input$view_type == "relative") {
+      bench <- DT[asset_class == input$benchmark, .(year, bench_return = annual_return)]
+      DT <- merge(DT, bench, by = "year", all.x = TRUE)
+      DT[, annual_return := annual_return - bench_return]
+    }
+    
+    return(DT)
+  })
+  
+  output$quiltPlot <- renderPlotly({
+    DT <- processed_data()
+    
+    p <- ggplot(DT, aes(x = factor(year), y = reorder(asset_class, -rank), fill = annual_return)) +
+      geom_tile(color = "white") +
+      geom_text(aes(label = percent(annual_return, accuracy = 0.1)), size = 3) +
+      scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0) +
+      labs(x = "Year", y = "", fill = "Return", title = "Annual Asset Class Performance") +
+      theme_minimal()
+    
+    ggplotly(p, tooltip = c("x", "y", "fill"))
+  })
+}
+
+shinyApp(ui, server)
+
