@@ -30,15 +30,14 @@ load_historical_data <- function() {
   
   dt <- fread(csv_path)
   
-  # Rename to match app expectations
   setnames(dt,
            old = c("Year", "Rank", "Asset Class", "Return"),
            new = c("year", "rank", "asset_class", "annual_return"),
            skip_absent = TRUE)
   
   dt[, year := as.character(year)]
-  
-  # Add category info from asset_info
+  dt[, annual_return := as.numeric(annual_return)]  # ← THE ONLY CHANGE
+
   dt <- merge(dt, asset_info[, .(asset_class, category)], by = "asset_class", all.x = TRUE)
   
   return(list(data = dt, from_excel = TRUE))
@@ -89,7 +88,6 @@ server <- function(input, output, session) {
 
     combined <- hist_dt
 
-    # Add annualised row
     annualised <- combined[year != "YTD", .(
       annual_return = (prod(1 + annual_return)^(1/.N)) - 1,
       year = "Annualised"
@@ -98,12 +96,10 @@ server <- function(input, output, session) {
     final <- rbindlist(list(combined, annualised), fill = TRUE)
     final <- final[category %in% input$category_filter]
 
-    # Hide selected rows
     if (!is.null(input$hide_rows)) {
       final <- final[!year %in% input$hide_rows]
     }
 
-    # Apply relative benchmark view
     if (input$view_type == "relative") {
       benchmark_returns <- final[asset_class == input$benchmark, .(year, bench_return = annual_return)]
       final <- merge(final, benchmark_returns, by = "year", all.x = TRUE)
@@ -111,16 +107,12 @@ server <- function(input, output, session) {
       final[, bench_return := NULL]
     }
 
-    # Ranking + label for quilt plot
     final[, rank := frank(-annual_return, ties.method = "first"), by = year]
     final[, label := paste0(asset_class, "\n", percent(annual_return, accuracy = 0.1))]
 
     return(final)
   })
 
-  # -----------------------------
-  # 5. Quilt Plot
-  # -----------------------------
   output$quiltPlot <- renderPlotly({
     df <- processed_data()
     if (is.null(df)) return(NULL)
@@ -153,9 +145,6 @@ server <- function(input, output, session) {
     ggplotly(p, tooltip = c("x", "label"))
   })
 
-  # -----------------------------
-  # 6. Download Plot
-  # -----------------------------
   output$downloadPlot <- downloadHandler(
     filename = function() { paste0("asset_quilt_", Sys.Date(), ".png") },
     content = function(file) {
