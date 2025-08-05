@@ -1,0 +1,262 @@
+# Load libraries
+library(shiny)
+library(data.table)
+library(tidyquant)
+library(ggplot2)
+library(plotly)
+library(scales)
+
+# -----------------------------
+# 1. Asset Info
+# -----------------------------
+asset_info <- data.table(
+  asset_class = c("Bitcoin", "Gold", "U.S. REITs", "U.S. Bonds",
+                  "U.S. Equities", "Commodities", "DM Equities", "EM Equities"),
+  ticker = c("BTC-USD", "IAU", "VNQ", "AGG",
+             "IWB", "^SPGSCI", "EFA", "EEM"),
+  category = c("Crypto", "Commodities", "REITs", "Bonds",
+               "Equities", "Commodities", "Equities", "Equities")
+)
+
+benchmark_choices <- setNames(asset_info$asset_class, 
+                              paste0(asset_info$asset_class, " (", asset_info$ticker, ")"))
+
+# -----------------------------
+# 2. Load historical data
+# -----------------------------
+load_historical_data <- function() {
+  csv_path <- "Historical_Asset_Data.csv"
+  if (file.exists(csv_path)) {
+    tryCatch({
+      dt <- fread(csv_path)
+      dt[, year := as.character(year)]
+      return(list(data = dt, from_excel = TRUE))
+    }, error = function(e) {
+      message("Failed to load CSV. Falling back to Yahoo.")
+      return(list(data = NULL, from_excel = FALSE))
+    })
+  } else {
+    return(list(data = NULL, from_excel = FALSE))
+  }
+}
+
+# -----------------------------
+# 3. UI
+# -----------------------------
+ui <- fluidPage(
+  titlePanel("Asset Class Return Map"),
+  sidebarLayout(
+    sidebarPanel(
+      dateInput("ytd_date", "Select YTD End Date:",
+                value = Sys.Date(), min = as.Date("2025-01-01"), max = Sys.Date()),
+      
+      conditionalPanel(
+        condition = "input.view_type == 'relative'",
+        selectInput("benchmark", "Select Benchmark (for Relative Returns):",
+                    choices = benchmark_choices, selected = "U.S. Equities")
+      ),
+      
+      radioButtons("view_type", "View Mode:",
+                   choices = c("Absolute Returns" = "absolute", "Relative to Benchmark" = "relative")),
+      
+      checkboxGroupInput("category_filter", "Filter by Category:",
+                         choices = unique(asset_info$category),
+                         selected = unique(asset_info$category)),
+      
+      checkboxGroupInput("hide_rows", "Hide Return Types:",
+                         choices = c("YTD", "Annualised"),
+                         selected = NULL),
+      
+      downloadButton("downloadPlot", "Download Chart as PNG"),
+      
+      br(), br(),
+      uiOutput("dataSourceNote"),
+      
+      width = 3
+    ),
+    mainPanel(
+      plotlyOutput("quiltPlot", height = "800px")
+    )
+  )
+)
+
+# -----------------------------
+# 4. Server
+# -----------------------------
+server <- function(input, output, session) {
+  
+  hist_data_obj <- reactiveVal(load_historical_data())
+  
+  output$dataSourceNote <- renderUI({
+    if (!hist_data_obj()$from_excel) {
+      HTML("<p style='color: red;'><strong>Note:</strong> Historical data is pulled from Yahoo Finance. May be incomplete or estimated. For best results, add a complete CSV file named <code>Historical_Asset_Data.csv</code> in your working directory.</p>")
+    } else {
+      HTML("<p><strong>Note:</strong> Historical return data is sourced from CSV. 2025 YTD returns are from Yahoo Finance.</p>")
+    }
+  })
+  
+  processed_data <- reactive({
+    hist_obj <- hist_data_obj()
+    hist_dt <- hist_obj$data
+    from_excel <- hist_obj$from_excel
+    
+    # Pull YTD data for 2025
+    ytd_prices <- tq_get(asset_info$ticker,
+                         from = "2025-01-01",
+                         to = input$ytd_date,
+                         get = "stock.prices")
+    
+    DT <- as.data.table(ytd_prices)
+    DT <- merge(DT, asset_info, by.x = "symbol", by.y = "ticker", all.x = TRUE)
+    
+    ytd_returns <- DT[, {
+      jan_price <- .SD[month(date) == 1][order(date)][1, adjusted]
+      latest_price <- .SD[order(date)][.N, adjusted]
+      if (!is.na(jan_price) & !is.na(latest_price)) {
+        data.table(year = "YTD", annual_return = latest_price / jan_price - 1)
+      } else {
+        NULL
+      }
+    }, by = .(asset_class, category)]
+    
+    # Combine with historical
+    if (from_excel) {
+      combined <- rbindlist(list(hist_dt, ytd_returns), fill = TRUE)
+    } else {
+      fallback_prices <- tq_get(asset_info$ticker,
+                                from = "2011-01-01",
+                                to = input$ytd_date,
+                                get = "stock.prices")
+      
+      full_DT <- as.data.table(fallback_prices)
+      full_DT <- merge(full_DT, asset_info, by.x = "symbol", by.y = "ticker", all.x = TRUE)
+      
+      annual_returns <- full_DT[, {
+        years <- unique(year(date))
+        result <- lapply(years, function(y) {
+          year_data <- .SD[year(date) == y]
+          jan_price <- year_data[month(date) == 1][order(date)][1, adjusted]
+          latest_price <- if (y == 2025) {
+            year_data[order(date)][.N, adjusted]
+          } else {
+            year_data[month(date) == 12][order(-date)][1, adjusted]
+          }
+          label_year <- if (y == 2025) "YTD" else as.character(y)
+          if (!is.na(jan_price) & !is.na(latest_price)) {
+            return(data.table(year = label_year, annual_return = latest_price / jan_price - 1))
+          } else {
+            return(NULL)
+          }
+        })
+        rbindlist(result)
+      }, by = .(asset_class, category)]
+      
+      combined <- annual_returns
+    }
+    
+    # Annualised
+    annualised <- combined[year != "YTD", .(
+      annual_return = (prod(1 + annual_return)^(1/.N)) - 1,
+      year = "Annualised"
+    ), by = .(asset_class, category)]
+    
+    final <- rbindlist(list(combined, annualised), fill = TRUE)
+    final <- final[category %in% input$category_filter]
+    
+    # Hide YTD/Annualised if selected
+    if (!is.null(input$hide_rows)) {
+      final <- final[!year %in% input$hide_rows]
+    }
+    
+    # Relative mode
+    if (input$view_type == "relative") {
+      benchmark_returns <- final[asset_class == input$benchmark, .(year, bench_return = annual_return)]
+      if (!is.null(input$hide_rows)) {
+        benchmark_returns <- benchmark_returns[!year %in% input$hide_rows]
+      }
+      final <- merge(final, benchmark_returns, by = "year", all.x = TRUE)
+      final[, annual_return := annual_return - bench_return]
+      final[, bench_return := NULL]
+    }
+    
+    final[, rank := frank(-annual_return, ties.method = "first"), by = year]
+    final[, label := paste0(asset_class, "\n", percent(annual_return, accuracy = 0.1))]
+    
+    return(final)
+  })
+  
+  # -----------------------------
+  # 5. Quilt Plot
+  # -----------------------------
+  output$quiltPlot <- renderPlotly({
+    df <- processed_data()
+    
+    asset_class_colors <- c(
+      "Bitcoin" = "#FFA500", "U.S. Equities" = "#003057", "DM Equities" = "#00558C",
+      "EM Equities" = "#00B2A9", "U.S. Bonds" = "#6C757D", "Gold" = "#C49A6C",
+      "Commodities" = "#8DC63F", "U.S. REITs" = "#E377C2"
+    )
+    
+    p <- ggplot(df, aes(x = factor(year), y = rank, fill = asset_class)) +
+      geom_tile(width = 0.95, height = 0.95, color = "white") +
+      geom_text(aes(label = label), size = 3, color = "white") +
+      scale_fill_manual(values = asset_class_colors) +
+      scale_y_reverse() +
+      labs(
+        x = "", y = "", fill = "Asset Class",
+        title = "Annual Asset Class Performance (YTD Included)",
+        subtitle = "Returns shown are based on ETF/index proxies using adjusted close prices.\nYTD = Jan 1 to selected date. May not reflect total return."
+      ) +
+      theme_minimal(base_size = 14) +
+      theme(
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.x = element_text(face = "bold"),
+        panel.grid = element_blank(),
+        legend.position = "bottom"
+      )
+    
+    ggplotly(p, tooltip = c("x", "label"))
+  })
+  
+  # -----------------------------
+  # 6. Download Plot
+  # -----------------------------
+  output$downloadPlot <- downloadHandler(
+    filename = function() { paste0("asset_quilt_", Sys.Date(), ".png") },
+    content = function(file) {
+      df <- processed_data()
+      asset_class_colors <- c(
+        "Bitcoin" = "#FFA500", "U.S. Equities" = "#003057", "DM Equities" = "#00558C",
+        "EM Equities" = "#00B2A9", "U.S. Bonds" = "#6C757D", "Gold" = "#C49A6C",
+        "Commodities" = "#8DC63F", "U.S. REITs" = "#E377C2"
+      )
+      
+      plot <- ggplot(df, aes(x = factor(year), y = rank, fill = asset_class)) +
+        geom_tile(width = 0.95, height = 0.95, color = "white") +
+        geom_text(aes(label = label), size = 3, color = "white") +
+        scale_fill_manual(values = asset_class_colors) +
+        scale_y_reverse() +
+        labs(
+          x = "", y = "", fill = "Asset Class",
+          title = "Annual Asset Class Performance (YTD Included)",
+          subtitle = "Returns shown are based on ETF/index proxies using adjusted close prices.\nYTD = Jan 1 to selected date. May not reflect total return."
+        ) +
+        theme_minimal(base_size = 14) +
+        theme(
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.x = element_text(face = "bold"),
+          panel.grid = element_blank(),
+          legend.position = "bottom"
+        )
+      
+      ggsave(file, plot = plot, width = 12, height = 8)
+    }
+  )
+}
+
+# -----------------------------
+# 7. Run App
+# -----------------------------
+shinyApp(ui, server)
