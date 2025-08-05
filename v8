@@ -30,23 +30,19 @@ load_historical_data <- function() {
   
   dt <- fread(csv_path)
   
-  # Rename columns to expected format
+  # Rename columns
   setnames(dt,
            old = c("Year", "Rank", "Asset Class", "Return"),
            new = c("year", "rank", "asset_class", "annual_return"),
            skip_absent = TRUE)
   
   dt[, year := as.character(year)]
-  
-  # FIX: Convert percent strings to numeric decimals
   dt[, annual_return := as.numeric(gsub("%", "", annual_return)) / 100]
-
-  # Drop any unnamed column if exists
+  
   if ("Unnamed: 4" %in% names(dt)) {
     dt[, `Unnamed: 4` := NULL]
   }
-
-  # Merge in category info
+  
   dt <- merge(dt, asset_info[, .(asset_class, category)], by = "asset_class", all.x = TRUE)
   
   return(list(data = dt, from_excel = TRUE))
@@ -117,7 +113,9 @@ server <- function(input, output, session) {
     }
 
     final[, rank := frank(-annual_return, ties.method = "first"), by = year]
-    final[, label := paste0(asset_class, "\n", percent(annual_return, accuracy = 0.1))]
+
+    # ✅ Truncate annual_return and display with 2 decimal places as percent
+    final[, label := paste0(asset_class, "\n", sprintf("%.2f%%", floor(annual_return * 10000) / 100))]
 
     return(final)
   })
