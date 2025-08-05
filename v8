@@ -30,7 +30,6 @@ load_historical_data <- function() {
   
   dt <- fread(csv_path)
   
-  # Rename columns
   setnames(dt,
            old = c("Year", "Rank", "Asset Class", "Return"),
            new = c("year", "rank", "asset_class", "annual_return"),
@@ -114,8 +113,11 @@ server <- function(input, output, session) {
 
     final[, rank := frank(-annual_return, ties.method = "first"), by = year]
 
-    # ✅ Truncate annual_return and display with 2 decimal places as percent
-    final[, label := paste0(asset_class, "\n", sprintf("%.2f%%", floor(annual_return * 10000) / 100))]
+    # ✅ Format with truncate (not round) to 2 decimal points
+    truncate_percent <- function(x) {
+      sprintf("%.2f%%", trunc(x * 10000) / 100)
+    }
+    final[, label := paste0(asset_class, "\n", truncate_percent(annual_return))]
 
     return(final)
   })
