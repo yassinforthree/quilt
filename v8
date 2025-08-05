@@ -30,14 +30,23 @@ load_historical_data <- function() {
   
   dt <- fread(csv_path)
   
+  # Rename columns to expected format
   setnames(dt,
            old = c("Year", "Rank", "Asset Class", "Return"),
            new = c("year", "rank", "asset_class", "annual_return"),
            skip_absent = TRUE)
   
   dt[, year := as.character(year)]
-  dt[, annual_return := as.numeric(annual_return)]  # ← THE ONLY CHANGE
+  
+  # FIX: Convert percent strings to numeric decimals
+  dt[, annual_return := as.numeric(gsub("%", "", annual_return)) / 100]
 
+  # Drop any unnamed column if exists
+  if ("Unnamed: 4" %in% names(dt)) {
+    dt[, `Unnamed: 4` := NULL]
+  }
+
+  # Merge in category info
   dt <- merge(dt, asset_info[, .(asset_class, category)], by = "asset_class", all.x = TRUE)
   
   return(list(data = dt, from_excel = TRUE))
